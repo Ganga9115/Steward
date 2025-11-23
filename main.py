@@ -11,6 +11,7 @@ import os
 from sentence_transformers import SentenceTransformer
 from lime.lime_text import LimeTextExplainer
 import spacy
+import json
 
 
 class TransactionModelSDK:
@@ -75,7 +76,7 @@ class TransactionModelSDK:
             self.label_encoder = None
 
     # --- FUNCTION 2: TRAIN MODEL (With Sentence Transformer & Config) ---
-    def train_model(self, new_categories_config=None):
+    def train_model(self, taxonomy_file = 'taxonomy.json'):
 
         """
         Function 2: Handles category mapping using Sentence Transformer and trains the model.
@@ -85,7 +86,7 @@ class TransactionModelSDK:
         
         # 1. Load Dataset
         df = pd.read_csv(self.data_path)
-
+                
         if 'original_category' not in df.columns:
             print("Creating 'original_category' backup column...")
             df['original_category'] = df['category']
@@ -103,7 +104,14 @@ class TransactionModelSDK:
                 print(f"Training on {len(df)} records (Original + Feedback).")
 
         # 2. Sentence Transformer Mapping (If user provided new config)
-        if new_categories_config:
+        if taxonomy_file and os.path.exists(taxonomy_file):
+            print(f"Loading User Taxonomy from {taxonomy_file}...")
+            
+            # 1. Load the JSON list
+            with open(taxonomy_file, 'r') as f:
+                new_categories_config = json.load(f)
+            
+            print(f"Target Categories: {new_categories_config}")
             
             print("Mapping old labels to new user configuration...")
             
@@ -163,6 +171,9 @@ class TransactionModelSDK:
             df = df.drop(columns = ['mapped_category'])
             df.to_csv(self.data_path, index=False)
             print(f"Category mapping complete: {mapping_dict}")
+        
+        else:
+            print("No taxonomy file found. Using existing dataset categories.")
 
         # 3. Create Pipeline (Vectorizer + Classifier)
         # We embed the vectorizer in the model file so we don't need separate files

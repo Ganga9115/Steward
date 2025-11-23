@@ -10,7 +10,7 @@ def run_manual_test():
     # sdk.train_model(new_categories_config=['Subscriptions & Entertainment', 'Utilities'])
 
     if not os.path.exists("model.pkl"):
-        sdk.train_model()
+        sdk.train_model(taxonomy_file='taxonomy.json')
         
 
     print("\n--- 3. PREDICTING ---")
