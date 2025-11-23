@@ -1,28 +1,20 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import re
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import FeatureUnion
-from sklearn.preprocessing import StandardScaler
-from scipy.sparse import hstack
 from sklearn.preprocessing import LabelEncoder
-from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.pipeline import Pipeline
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 import joblib
 import os
 from sentence_transformers import SentenceTransformer
 from lime.lime_text import LimeTextExplainer
+import spacy
 
 
 class TransactionModelSDK:
-    def __init__(self, model_path='model.pkl', data_path='transactions.csv', feedback_path = 'feedback_storage.csv', feedback_threshold=10):
+    def __init__(self, model_path='model.pkl', data_path='transactions.csv', feedback_path = 'feedback_storage.csv', feedback_threshold=100):
 
         """
         Initialize the SDK.
@@ -34,14 +26,39 @@ class TransactionModelSDK:
         self.data_path = data_path
         self.feedback_path = feedback_path
         self.feedback_threshold = feedback_threshold
-        self.feedback_buffer = []  # Temporary storage for feedback
+        
         self.model = None
         self.label_encoder = None
 
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            print("Downloading Spacy model...")
+            from spacy.cli import download
+            download("en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
+
         # Load the model immediately if it exists
         self.load_model()
-
     # --- FUNCTION 1: LOAD MODEL ---
+
+    def _preprocess(self, text):
+        """
+        Private helper to clean text using Spacy.
+        Removes stop words, punctuation, and performs lemmatization.
+        """
+        # Convert to string to handle potential NaNs or numbers
+        text = str(text).lower() 
+        doc = self.nlp(text)
+        
+        filtered_tokens = []
+        for token in doc:
+            if token.is_stop or token.is_punct:
+                continue
+            filtered_tokens.append(token.lemma_)
+            
+        return " ".join(filtered_tokens)
+    
     def load_model(self):
 
         """
@@ -69,16 +86,21 @@ class TransactionModelSDK:
         # 1. Load Dataset
         df = pd.read_csv(self.data_path)
 
+        if 'original_category' not in df.columns:
+            print("Creating 'original_category' backup column...")
+            df['original_category'] = df['category']
+            # Save immediately so we don't lose this structure
+            df.to_csv(self.data_path, index=False)
+
         if os.path.exists(self.feedback_path):
             print(f"Found feedback data in {self.feedback_path}. Merging...")
             df_fb = pd.read_csv(self.feedback_path)
             if not df_fb.empty:
                 # specific columns to ensure match
-                df_fb = df_fb[['transaction_description', 'currency', 'category']]
+                df_fb['original_category'] = df_fb['category']
+                df_fb = df_fb[['transaction_description', 'currency', 'category','original_category']]
                 df = pd.concat([df, df_fb], ignore_index=True)
                 print(f"Training on {len(df)} records (Original + Feedback).")
-
-        y = df['category']
 
         # 2. Sentence Transformer Mapping (If user provided new config)
         if new_categories_config:
@@ -88,7 +110,7 @@ class TransactionModelSDK:
             # Load Sentence Transformer (Deep Learning)
             mapper_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
             
-            old_categories = y.unique()
+            old_categories = df["original_category"].unique()
             new_categories = new_categories_config
 
             # Encode both sets of labels
@@ -134,7 +156,7 @@ class TransactionModelSDK:
                 return info["mapped_to"]
 
             # Apply mapping to dataset
-            df["mapped_category"] = df["category"].apply(lambda c: map_category(c, mapping_dict))
+            df["mapped_category"] = df["original_category"].apply(lambda c: map_category(c, mapping_dict))
             
             # Save the updated dataset (optional, to persist the mapping)
             df["category"] = df["mapped_category"]
@@ -159,7 +181,7 @@ class TransactionModelSDK:
 
         label_encoder = LabelEncoder()
         y = label_encoder.fit_transform(df['category'])   
-        X = df.drop(columns=['category'])
+        X = df.drop(columns=['category','original_category'])
 
         # 4. Train and Save
         clf.fit(X, y)
@@ -169,125 +191,211 @@ class TransactionModelSDK:
         print("Model trained and saved successfully.")
 
     # --- FUNCTION 3: PREDICT (With LIME Explainability) ---
-    def predict_transaction(self, description, currency):
+    # --- FUNCTION 3: PREDICT (Unified: Single or Batch) ---
+    
+
+    
+    
+    def predict_transaction(self, description, currency="INR"):
         """
         Function 3: Predicts category and provides LIME explanation.
-        :return: Dictionary containing prediction and explanation list.
+        Accepts either single strings OR lists.
+        
+        :param description: String "Uber" OR List ["Uber", "Netflix"]
+        :param currency: String "USD" OR List ["USD", "USD"]
+        :return: Dictionary (if single input) OR List of Dictionaries (if list input)
         """
         if not self.model or not self.label_encoder:
             return {"error": "Model or Encoder not loaded"}
 
-        input_data = pd.DataFrame(
-            [[description, currency]], 
-            columns=['transaction_description', 'currency']
-        )
-        # 1. Make Prediction
-        pred_idx = self.model.predict(input_data)[0]
-        probs = self.model.predict_proba(input_data)[0]
-        pred_label = self.label_encoder.inverse_transform([pred_idx])[0]
-        confidence = probs[pred_idx]
-        # probabilities = self.model.predict_proba(transaction_text)
+        # --- 1. NORMALIZE INPUTS ---
+        # Check if input is a list or a single string
+        is_batch = isinstance(description, list)
+        
+        # Convert single string to list so we can process everything uniformly
+        desc_list = description if is_batch else [description]
+        
+        clean_desc_list = [self._preprocess(text) for text in desc_list]
 
-        # 2. Generate LIME Explanation
-        def lime_predict_wrapper(text_list):
-            # Create a DataFrame where 'description' varies, but 'currency' stays constant
-            df_lime = pd.DataFrame({
-                "transaction_description": text_list,
-                "currency": [currency] * len(text_list) # Repeat currency for every text variation
-            })
-            return self.model.predict_proba(df_lime)
+        # Handle Currency (Broadcast single currency if needed)
+        if isinstance(currency, list):
+            curr_list = currency
+            if len(curr_list) != len(clean_desc_list):
+                return {"error": "Description and Currency list lengths do not match"}
+        else:
+            curr_list = [currency] * len(clean_desc_list)
 
-        # Initialize LIME Explainer with your specific class names
+        # --- 2. FAST VECTORIZED PREDICTION ---
+        # We predict everything in one shot using Matrix operations
+        input_data = pd.DataFrame({
+            'transaction_description': clean_desc_list,
+            'currency': curr_list
+        })
+
+        # Get indices and probabilities for the whole batch
+        pred_indices = self.model.predict(input_data)
+        probs = self.model.predict_proba(input_data)
+        
+        # Decode all labels at once
+        pred_labels = self.label_encoder.inverse_transform(pred_indices)
+
+        # --- 3. GENERATE RESULTS & LIME EXPLANATIONS ---
+        results = []
+        
+        # Initialize Explainer (Do this only once to save time)
         explainer = LimeTextExplainer(class_names=self.label_encoder.classes_)
 
-        # Generate Explanation
-        # num_features=5 means "Show me the top 5 words that caused this decision"
-        exp = explainer.explain_instance(
-            text_instance=description, 
-            classifier_fn=lime_predict_wrapper, 
-            num_features=5,
-            top_labels=1
-        )
+        for i in range(len(clean_desc_list)):
+            current_desc = clean_desc_list[i]
+            current_curr = curr_list[i]
+            current_prob = probs[i][pred_indices[i]]
+            current_label = pred_labels[i]
+
+            # --- LIME Logic (Per Transaction) ---
+            # We define a wrapper specifically for THIS transaction's context
+            def lime_predict_wrapper(text_list):
+                # Helper to format data exactly how the model expects it
+                df_lime = pd.DataFrame({
+                    "transaction_description": text_list,
+                    "currency": [current_curr] * len(text_list)
+                })
+                return self.model.predict_proba(df_lime)
+
+            try:
+                # Run LIME
+                exp = explainer.explain_instance(
+                    text_instance=current_desc, 
+                    classifier_fn=lime_predict_wrapper, 
+                    num_features=5,
+                    top_labels=1
+                )
+                explanation_list = exp.as_list(label=exp.top_labels[0])
+            except Exception:
+                explanation_list = []
+
+            # Append result
+            results.append({
+                "transaction": current_desc,
+                "currency": current_curr,
+                "predicted_category": current_label,
+                "confidence": float(current_prob),
+                "explanation": explanation_list
+            })
+
+        # --- 4. RETURN FORMAT ---
+        # If user sent a list, return a list. If user sent a string, return a single dict.
+        if is_batch:
+            return results
+        else:
+            return results[0]
+    # --- FUNCTION 3: PREDICT (Unified: Single or Batch) ---
+    def predict_batch_transaction(self, description, currency="INR"):
+        """
+        Function 3: Predicts category and provides LIME explanation.
+        Accepts either single strings OR lists.
         
-        # Extract the explanation list: [('Court', 0.20), ('Fee', 0.05)]
-        # exp.top_labels[0] ensures we get reasons for the PREDICTED category
-        explanation_list = exp.as_list(label=exp.top_labels[0])
+        :param description: String "Uber" OR List ["Uber", "Netflix"]
+        :param currency: String "USD" OR List ["USD", "USD"]
+        :return: Dictionary (if single input) OR List of Dictionaries (if list input)
+        """
+        if not self.model or not self.label_encoder:
+            return {"error": "Model or Encoder not loaded"}
 
+        # --- 1. NORMALIZE INPUTS ---
+        # Check if input is a list or a single string
+        is_batch = isinstance(description, list)
+        
+        # Convert single string to list so we can process everything uniformly
+        desc_list = description if is_batch else [description]
+        
+        clean_desc_list = [self._preprocess(text) for text in desc_list]
 
-        return {
-            "transaction": description,
-            "currency": currency,
-            "predicted_category": pred_label,
-            "confidence": float(confidence),
-            "explanation": explanation_list
-        }
+        # Handle Currency (Broadcast single currency if needed)
+        if isinstance(currency, list):
+            curr_list = currency
+            if len(curr_list) != len(clean_desc_list):
+                return {"error": "Description and Currency list lengths do not match"}
+        else:
+            curr_list = [currency] * len(clean_desc_list)
 
+        # --- 2. FAST VECTORIZED PREDICTION ---
+        # We predict everything in one shot using Matrix operations
+        input_data = pd.DataFrame({
+            'transaction_description': clean_desc_list,
+            'currency': curr_list
+        })
+
+        # Get indices and probabilities for the whole batch
+        pred_indices = self.model.predict(input_data)
+        probs = self.model.predict_proba(input_data)
+        
+        # Decode all labels at once
+        pred_labels = self.label_encoder.inverse_transform(pred_indices)
+
+        # --- 3. GENERATE RESULTS & LIME EXPLANATIONS ---
+        results = []
+        
+        
+        # Append result
+        for i in range(len(pred_indices)):
+            results.append({
+                "transaction": clean_desc_list[i],
+                "currency": curr_list[i],
+                "predicted_category": pred_labels[i],
+                "confidence": float(probs[i][pred_indices[i]]),
+            })
+        # --- 4. RETURN FORMAT ---
+    
+        return results
+    
     # --- FxUNCTION 4: ADD FEEDBACK (Human Loop & Retraining) ---
-    def add_feedback(self, description, currency, correct_category, weight = 50):
+    def add_feedback(self, description, currency, correct_category):
         """
         Stores feedback. If threshold is met, saves to CSV and Re-trains.
         """
         print(f"Feedback received: {description} -> {correct_category}")
         
-        # Add to temporary buffer
-        for _ in range(weight):
-            self.feedback_buffer.append({
-                'transaction_description': description,
-                'currency': currency,
-                'category': correct_category
-            })
+        new_row = pd.DataFrame([{
+            'transaction_description': description,
+            'currency': currency,
+            'category': correct_category,
+            'original_category': correct_category
+        }])
+    
+        # 1. SAVE IMMEDIATELY (Safety First!)
+        # We append to the file so we don't lose data on restart
+        if not os.path.exists(self.feedback_path):
+            new_row.to_csv(self.feedback_path, index=False)
+        else:
+            new_row.to_csv(self.feedback_path, mode='a', header=False, index=False)
 
-        # Check Threshold
-        if len(self.feedback_buffer) >= self.feedback_threshold:
-            print(f"Threshold ({self.feedback_threshold}) reached. Saving to {self.feedback_path} and retraining...")
+        # 3. Check how many records are currently in the storage
+        # We read the file to count rows. 
+        try:
+            current_feedback_df = pd.read_csv(self.feedback_path)
+            current_count = len(current_feedback_df)
+        except Exception:
+            current_count = 0
+
+        # 4. Check Threshold
+        # If we have reached (or passed) the threshold, we retrain.
+        if current_count > 0 and current_count % self.feedback_threshold == 0:
+            print(f"Threshold ({self.feedback_threshold}) reached. Total feedback rows: {current_count}. Retraining...")
             
-            # 1. Convert buffer to DataFrame
-            new_feedback_df = pd.DataFrame(self.feedback_buffer)
-            
-            # 2. Append to Feedback CSV (Create if not exists)
-            if not os.path.exists(self.feedback_path):
-                new_feedback_df.to_csv(self.feedback_path, index=False)
-            else:
-                new_feedback_df.to_csv(self.feedback_path, mode='a', header=False, index=False)
-            
-            # 3. Clear Buffer
-            self.feedback_buffer = []
-            
-            # 4. Trigger Retraining 
-            # (This will now load the updated feedback CSV automatically)
+            # Trigger Retraining (This merges CSV + Feedback and rebuilds model)
             self.train_model()
             
-            return {"status": "Model Retrained", "buffer_size": 0}
+            # OPTIONAL: Clear the feedback file after successful training?
+            # If your train_model() merges and SAVES the combined data to transactions.csv, you should clear this.
+            # If your train_model() only reads both files but doesn't save the merge, DO NOT CLEAR THIS.
+            # Based on your current code, you DO NOT save the merge, so we keep the file.
+            
+            return {"status": "Model Retrained", "total_feedback": current_count}
         
         else:
-            remaining = self.feedback_threshold - len(self.feedback_buffer)
-            print(f"Feedback buffered. {remaining} more needed for retrain.")
+            remaining = self.feedback_threshold - (current_count % self.feedback_threshold)
+            print(f"Feedback saved. {remaining} more needed for retrain.")
             return {
                 "status": "Feedback Buffered", 
                 "remaining_until_retrain": remaining
             }
-
-# ==========================================
-# EXAMPLE USAGE (For the Developer)
-# ==========================================
-# if __name__ == "__main__":
-#     # 1. Initialize
-#     sdk = TransactionModelSDK(feedback_threshold=2) # Low threshold for testing
-
-#     # 2. Developer passes a Config File (JSON list) to map categories
-#     user_categories = ["Travel & Transport", "Food & Dining", "Utilities", "Income"]
-#     # This triggers the Sentence Transformer mapping and initial training
-#     sdk.train_model(new_categories_config=user_categories)
-
-#     # 3. Make a Prediction (with LIME)
-#     result = sdk.predict_transaction("Uber trip to office")
-#     print("\nPrediction Result:")
-#     print(result) 
-#     # Output will show "Travel & Transport" and explain that "Uber" was the key reason.
-
-#     # 4. Human Feedback Loop
-#     # Let's say the user corrects a prediction
-#     print("\n--- User gives feedback ---")
-#     sdk.add_feedback("Starbucks coffee", "Food & Dining") # Buffer = 1
-#     sdk.add_feedback("Monthly Rent payment", "Utilities")   # Buffer = 2 (Threshold hit!)
-#     # The model automatically retrains here.
