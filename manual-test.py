@@ -32,12 +32,12 @@ def run_manual_test():
 
 
 
-    # print("\n--- 3. GIVING FEEDBACK ---")
-    # # Simulating user saying: "No, that is Investment"
-    # # Note: "Investment" might be a NEW category not in the original dataset!
+    print("\n--- 3. GIVING FEEDBACK ---")
+    # Simulating user saying: "No, that is Investment"
+    # Note: "Investment" might be a NEW category not in the original dataset!
     
-    # # Feedback 1
-    # sdk.add_feedback(txn_desc, txn_curr, "Investment") 
+    # Feedback 1
+    sdk.add_feedback(txn_desc, txn_curr, "Movie") 
 
 
 
