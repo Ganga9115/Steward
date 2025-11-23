@@ -1,0 +1,17 @@
+# Ignore the virtual environment (Libraries)
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Ignore large Datasets (Don't push 4.5M rows to GitHub)
+*.csv
+*.xlsx
+
+# Ignore large Model files (They are too big and can be retrained)
+*.pkl
+*.joblib
+*.h5
+
+# Ignore system files
+.DS_Store
