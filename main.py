@@ -15,7 +15,7 @@ import json
 
 
 class TransactionModelSDK:
-    def __init__(self, model_path='model.pkl', data_path='transactions.csv', feedback_path = 'feedback_storage.csv', feedback_threshold=100):
+    def __init__(self, model_path='model.pkl', data_path='transactions.csv', extra_data_path = 'extra_transactions.csv', feedback_path = 'feedback_storage.csv', feedback_threshold=100):
 
         """
         Initialize the SDK.
@@ -25,6 +25,7 @@ class TransactionModelSDK:
         """
         self.model_path = model_path
         self.data_path = data_path
+        self.extra_data_path = extra_data_path
         self.feedback_path = feedback_path
         self.feedback_threshold = feedback_threshold
         
@@ -86,13 +87,19 @@ class TransactionModelSDK:
         
         # 1. Load Dataset
         df = pd.read_csv(self.data_path)
-                
+
+        if os.path.exists(self.extra_data_path):
+            print(f"Loading extra data from {self.extra_data_path}...")
+            df_extra = pd.read_csv(self.extra_data_path)
+            df = pd.concat([df, df_extra], ignore_index=True)
+            print(f"Total records after adding extra data: {len(df)}")
+            
         if 'original_category' not in df.columns:
             print("Creating 'original_category' backup column...")
             df['original_category'] = df['category']
             # Save immediately so we don't lose this structure
             df.to_csv(self.data_path, index=False)
-
+ 
         if os.path.exists(self.feedback_path):
             print(f"Found feedback data in {self.feedback_path}. Merging...")
             df_fb = pd.read_csv(self.feedback_path)
@@ -126,7 +133,7 @@ class TransactionModelSDK:
             new_embs = mapper_model.encode(new_categories, normalize_embeddings=True)
 
             # Calculate Cosine Similarity to find best matches
-            def build_semantic_mapping(old_cats, new_cats, old_embs, new_embs, threshold=0.5):
+            def build_semantic_mapping(old_cats, new_cats, old_embs, new_embs, threshold=0.4):
 
                 mapping = {}
                 
@@ -200,21 +207,12 @@ class TransactionModelSDK:
         self.model = clf
         self.label_encoder = label_encoder 
         print("Model trained and saved successfully.")
-
-    # --- FUNCTION 3: PREDICT (With LIME Explainability) ---
-    # --- FUNCTION 3: PREDICT (Unified: Single or Batch) ---
-    
-
     
     
     def predict_transaction(self, description, currency="INR"):
+
         """
         Function 3: Predicts category and provides LIME explanation.
-        Accepts either single strings OR lists.
-        
-        :param description: String "Uber" OR List ["Uber", "Netflix"]
-        :param currency: String "USD" OR List ["USD", "USD"]
-        :return: Dictionary (if single input) OR List of Dictionaries (if list input)
         """
         if not self.model or not self.label_encoder:
             return {"error": "Model or Encoder not loaded"}
