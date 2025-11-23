@@ -1,4 +1,4 @@
-****Steward The Transaction Categorization SDK****
+# ****Steward The Transaction Categorization SDK****
 
 A machine-learning-powered SDK for classifying financial transactions (e.g., "Starbucks" → "Food & Dining"). It features Semantic Taxonomy Mapping, Explainability (LIME), and a Self-Learning Feedback Loop.
 
