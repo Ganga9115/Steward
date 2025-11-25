@@ -16,14 +16,15 @@ Human-in-the-Loop: An automated feedback system that collects user corrections a
 
 Ensure you have Python 3.9+ installed. Install the required libraries using requirements.txt file:
 
-Bash pip install -r requirements.txt
+    Bash 
+    pip install -r requirements.txt
 
 2. Download NLP Models
 
 The SDK uses Spacy for text cleaning and Sentence Transformers for category mapping.
 
-# Download Spacy English core
-Bash python -m spacy download en_core_web_sm
+    Bash 
+    python -m spacy download en_core_web_sm
 
 3. Project Structure
 
